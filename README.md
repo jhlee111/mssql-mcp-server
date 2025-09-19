@@ -31,17 +31,42 @@ This server leverages the Model Context Protocol (MCP), a versatile framework th
 ### Prerequisites
 - Node.js 14 or higher
 - Claude Desktop or VS Code with Agent extension
+- GitHub account with Personal Access Token for package access
 
-### Set up project
+### Installation
 
-1. **Install Dependencies**  
-   Run the following command in the root folder to install all necessary dependencies:  
+#### Option 1: Install from GitHub Packages
+
+1. **Create a GitHub Personal Access Token**
+   - Go to GitHub Settings → Developer settings → Personal access tokens
+   - Create a token with `read:packages` scope
+   - Save the token securely
+
+2. **Configure npm for GitHub Packages**
+   ```bash
+   echo "@jhlee111:registry=https://npm.pkg.github.com" >> ~/.npmrc
+   echo "//npm.pkg.github.com/:_authToken=YOUR_GITHUB_TOKEN" >> ~/.npmrc
+   ```
+
+3. **Install the package**
+   ```bash
+   npm install @jhlee111/mssql-mcp-server
+   ```
+
+#### Option 2: Install from Source
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/jhlee111/mssql-mcp-server.git
+   cd mssql-mcp-server
+   ```
+
+2. **Install Dependencies**
    ```bash
    npm install
    ```
 
-2. **Build the Project**  
-   Compile the project by running:  
+3. **Build the Project**
    ```bash
    npm run build
    ```

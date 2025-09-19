@@ -1,6 +1,16 @@
 {
-  "name": "mssql-mcp-server",
+  "name": "@jhlee111/mssql-mcp-server",
   "version": "1.0.0",
+  "description": "MCP server for MSSQL database operations",
+  "author": "John Lee <jhlee111@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jhlee111/mssql-mcp-server.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "main": "dist/index.js",
   "bin": {
     "mssql-mcp-server": "dist/index.js"
