@@ -216,7 +216,7 @@ export class ReadDataTool implements Tool {
       }
 
       // Log the query for audit purposes (in production, consider more secure logging)
-      console.log(`Executing validated SELECT query: ${query.substring(0, 200)}${query.length > 200 ? '...' : ''}`);
+      console.error(`Executing validated SELECT query: ${query.substring(0, 200)}${query.length > 200 ? '...' : ''}`);
 
       // Execute the query
       const request = new sql.Request();

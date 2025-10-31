@@ -12,6 +12,7 @@ import {
 
 // Internal imports
 import { UpdateDataTool } from "./tools/UpdateDataTool.js";
+import { DeleteDataTool } from "./tools/DeleteDataTool.js";
 import { InsertDataTool } from "./tools/InsertDataTool.js";
 import { ReadDataTool } from "./tools/ReadDataTool.js";
 import { CreateTableTool } from "./tools/CreateTableTool.js";
@@ -19,6 +20,8 @@ import { CreateIndexTool } from "./tools/CreateIndexTool.js";
 import { ListTableTool } from "./tools/ListTableTool.js";
 import { DropTableTool } from "./tools/DropTableTool.js";
 import { DescribeTableTool } from "./tools/DescribeTableTool.js";
+import { loadSafetyConfig } from "./SafetyConfig.js";
+import { detectServerCapabilities, ServerCapabilities } from "./ServerCapabilities.js";
 
 // MSSQL Database connection configuration
 
@@ -69,8 +72,20 @@ function validateEnvVariables(): void {
 // Validate environment variables on startup
 validateEnvVariables();
 
+// Load safety configuration
+const safetyConfig = loadSafetyConfig();
+console.error('Safety Configuration:', {
+  allowDangerousOperations: safetyConfig.allowDangerousOperations,
+  requireApprovalForCreate: safetyConfig.requireApprovalForCreate,
+  requireApprovalForUpdate: safetyConfig.requireApprovalForUpdate,
+  requireApprovalForDelete: safetyConfig.requireApprovalForDelete,
+  requireApprovalForInsert: safetyConfig.requireApprovalForInsert,
+  enableDryRun: safetyConfig.enableDryRun
+});
+
 // Globals for connection reuse
 let globalSqlPool: sql.ConnectionPool | null = null;
+let serverCapabilities: ServerCapabilities | null = null;
 
 // Function to create SQL config with SQL authentication
 export async function createSqlConfig(): Promise<sql.config> {
@@ -96,19 +111,26 @@ export async function createSqlConfig(): Promise<sql.config> {
   };
 }
 
-const updateDataTool = new UpdateDataTool();
-const insertDataTool = new InsertDataTool();
+// Initialize tools with safety configuration (capabilities added after connection)
+const updateDataTool = new UpdateDataTool(safetyConfig);
+const deleteDataTool = new DeleteDataTool(safetyConfig);
+const insertDataTool = new InsertDataTool(safetyConfig);
 const readDataTool = new ReadDataTool();
-const createTableTool = new CreateTableTool();
+const createTableTool = new CreateTableTool(safetyConfig);
 const createIndexTool = new CreateIndexTool();
 const listTableTool = new ListTableTool();
-const dropTableTool = new DropTableTool();
+const dropTableTool = new DropTableTool(safetyConfig);
 const describeTableTool = new DescribeTableTool();
+
+// Getter for server capabilities (set after first connection)
+export function getServerCapabilities(): ServerCapabilities | null {
+  return serverCapabilities;
+}
 
 const server = new Server(
   {
     name: "mssql-mcp-server",
-    version: "0.1.0",
+    version: "1.1.0",
   },
   {
     capabilities: {
@@ -125,7 +147,7 @@ const isReadOnly = process.env.READONLY === "true";
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: isReadOnly
     ? [listTableTool, readDataTool, describeTableTool] // todo: add searchDataTool to the list of tools available in readonly mode once implemented
-    : [insertDataTool, readDataTool, describeTableTool, updateDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool], // add all new tools here
+    : [insertDataTool, readDataTool, describeTableTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool], // add all new tools here
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -141,6 +163,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case updateDataTool.name:
         result = await updateDataTool.run(args);
+        break;
+      case deleteDataTool.name:
+        result = await deleteDataTool.run(args);
         break;
       case createTableTool.name:
         result = await createTableTool.run(args);
@@ -217,6 +242,22 @@ async function ensureSqlConnection() {
   }
 
   globalSqlPool = await sql.connect(config);
+
+  // Detect server capabilities on first connection
+  if (!serverCapabilities) {
+    try {
+      serverCapabilities = await detectServerCapabilities();
+      console.error('SQL Server capabilities detected:', {
+        version: serverCapabilities.version.productName,
+        dropIfExists: serverCapabilities.supportsDropIfExists,
+        json: serverCapabilities.supportsJson,
+        stringAgg: serverCapabilities.supportsStringAggActual
+      });
+    } catch (error) {
+      console.error('Failed to detect server capabilities:', error);
+      console.warn('Server will operate with SQL Server 2008 compatibility mode');
+    }
+  }
 }
 
 // Patch all tool handlers to ensure SQL connection before running
@@ -228,4 +269,4 @@ function wrapToolRun(tool: { run: (...args: any[]) => Promise<any> }) {
   };
 }
 
-[insertDataTool, readDataTool, updateDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, describeTableTool].forEach(wrapToolRun);
+[insertDataTool, readDataTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, describeTableTool].forEach(wrapToolRun);

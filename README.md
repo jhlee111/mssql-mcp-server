@@ -169,14 +169,66 @@ This server leverages the Model Context Protocol (MCP), a versatile framework th
 
 ### Configuration Parameters
 
-- **SERVER_NAME**: Your MSSQL server name (e.g., `my-server.database.windows.net` for Azure SQL, or `localhost` for local SQL Server)
-- **DATABASE_NAME**: Your database name
-- **SQL_USER**: SQL Server username for authentication
-- **SQL_PASSWORD**: SQL Server password for authentication
+#### Required Database Connection Parameters
+
+- **MSSQL_SERVER**: Your MSSQL server name (e.g., `my-server.database.windows.net` for Azure SQL, or `localhost` for local SQL Server)
+- **MSSQL_DATABASE**: Your database name
+- **MSSQL_USER**: SQL Server username for authentication
+- **MSSQL_PASSWORD**: SQL Server password for authentication
+
+#### Optional Connection Parameters
+
 - **READONLY**: Set to `"true"` to restrict to read-only operations, `"false"` for full access
-- **Path**: Update the path in `args` to point to your actual project location
-- **CONNECTION_TIMEOUT**: (Optional) Connection timeout in seconds. Defaults to `30` if not set
-- **TRUST_SERVER_CERTIFICATE**: (Optional) Set to `"true"` to trust self-signed server certificates (useful for development or when connecting to servers with self-signed certs). Defaults to `"false"`
+- **MSSQL_CONNECTION_TIMEOUT**: Connection timeout in seconds. Defaults to `30` if not set
+- **MSSQL_TRUST_SERVER_CERTIFICATE**: Set to `"true"` to trust self-signed server certificates (useful for development). Defaults to `"false"`
+
+#### Safety Configuration Parameters (New!)
+
+These parameters control approval requirements and operational safety:
+
+**DANGEROUS OPERATIONS (DROP):**
+
+- **ALLOW_DANGEROUS_OPERATIONS**: Allow DROP operations (default: `false` - FORBIDDEN)
+  - DROP operations are **FORBIDDEN by default** for maximum safety
+  - Must explicitly set to `true` to enable DROP TABLE/INDEX operations
+  - **⚠️ CRITICAL WARNING**: DROP operations permanently delete tables/indexes and all their data
+  - Even when enabled, use with `ENABLE_DRY_RUN=true` to preview before executing
+
+**REGULAR OPERATIONS APPROVAL:**
+
+- **REQUIRE_APPROVAL_CREATE**: Require approval for CREATE operations (default: `false`)
+  - When `true`, CREATE TABLE operations are blocked until explicitly enabled
+  - Set to `false` to allow CREATE operations
+
+- **REQUIRE_APPROVAL_UPDATE**: Require approval for UPDATE operations (default: `false`)
+  - When `true`, UPDATE operations are blocked until explicitly enabled
+  - Set to `false` to allow UPDATE operations
+
+- **REQUIRE_APPROVAL_DELETE**: Require approval for DELETE operations (default: `false`)
+  - When `true`, DELETE (row removal) operations are blocked until explicitly enabled
+  - Set to `false` to allow DELETE operations
+  - **Note**: DELETE removes rows, DROP removes entire tables (different operations!)
+
+- **REQUIRE_APPROVAL_INSERT**: Require approval for INSERT operations (default: `false`)
+  - When `true`, INSERT operations are blocked until explicitly enabled
+  - Set to `false` to allow INSERT operations
+
+**DRY-RUN AND LOGGING:**
+
+- **ENABLE_DRY_RUN**: Enable dry-run mode for all destructive operations (default: `false`)
+  - When `true`, all CREATE, DROP, UPDATE, DELETE, and INSERT operations are previewed but NOT executed
+  - Shows the exact SQL query and estimated impact without making database changes
+  - Essential for testing and understanding what the LLM intends to do before execution
+  - **Recommended**: Always enable for DROP operations even when `ALLOW_DANGEROUS_OPERATIONS=true`
+
+- **OPERATION_LOG_DIR**: Directory for operation logs (default: `./logs`)
+  - All destructive operations are automatically logged to `operations.log` in this directory
+  - Logs include timestamp, operation type, severity, SQL query, and success/failure status
+  - Provides audit trail for compliance and debugging
+
+#### Path Configuration
+
+- **Path**: Update the path in `args` to point to your actual project location (absolute path to `dist/index.js`)
 
 ### Authentication Methods
 
@@ -202,6 +254,50 @@ You can find sample configuration files in the `src/samples/` folder:
 - `claude_desktop_config.json` - For Claude Desktop
 - `vscode_agent_config.json` - For VS Code Agent
 
+## SQL Server Version Support
+
+The MCP server **automatically detects** your SQL Server version and adapts its syntax accordingly. It supports:
+
+- **SQL Server 2008/2008 R2** (10.x) and later
+- **SQL Server 2012** (11.x) - Adds sequences, window functions, OFFSET/FETCH
+- **SQL Server 2014** (12.x) - Adds In-Memory OLTP
+- **SQL Server 2016** (13.x) - Adds DROP IF EXISTS, JSON type, temporal tables
+- **SQL Server 2017** (14.x) - Adds STRING_AGG, graph database
+- **SQL Server 2019** (15.x) - Adds UTF-8 support
+- **SQL Server 2022** (16.x) - Adds JSON extensions
+
+### Version-Aware Features
+
+**Automatic Syntax Adaptation:**
+- `DROP TABLE IF EXISTS` on SQL Server 2016+ (falls back to standard DROP on older versions)
+- Data type validation (warns if JSON type used on pre-2016)
+- Feature availability warnings
+
+**On First Connection:**
+```
+Detected SQL Server version: Microsoft SQL Server 2019 (RTM) - 15.0.2000.5
+Server capabilities detected: {
+  version: 'SQL Server 2019',
+  dropIfExists: true,
+  json: true,
+  stringAgg: true
+}
+```
+
+### Compatibility Notes
+
+The LLM will automatically:
+- Use version-appropriate syntax
+- Warn about unsupported features
+- Suggest alternatives for older versions
+
+For example, if you ask to create a table with JSON column on SQL Server 2014:
+```
+⚠️  Data Type Warnings:
+  - Column 'data': JSON type requires SQL Server 2016+.
+    Current: SQL Server 2014. Consider using NVARCHAR(MAX) instead.
+```
+
 ## Usage Examples
 
 Once configured, you can interact with your database using natural language:
@@ -210,11 +306,208 @@ Once configured, you can interact with your database using natural language:
 - "Create a new table called products with columns for id, name, and price"
 - "Update all pending orders to completed status"
 - "List all tables in the database"
+- "Drop the temp_data table if it exists" (uses IF EXISTS on SQL Server 2016+)
 
-## Security Notes
+## Safety and Security Features
+
+### Built-in Security
 
 - The server requires a WHERE clause for read operations to prevent accidental full table scans
 - Update operations require explicit WHERE clauses for security
 - Set `READONLY: "true"` in production environments if you only need read access
+- Extensive SQL injection protection in ReadDataTool with keyword blocking and pattern detection
 
-You should now have successfully configured the MCP server for MSSQL Database with your preferred AI assistant. This setup allows you to seamlessly interact with MSSQL Database through natural language queries!
+### Safety System (New!)
+
+The MCP server includes a comprehensive safety system with special protection for destructive operations:
+
+#### 1. DROP Operations - FORBIDDEN by Default
+
+DROP operations are **FORBIDDEN** unless explicitly enabled:
+```json
+{
+  "env": {
+    "ALLOW_DANGEROUS_OPERATIONS": "false"  // Default - DROP is FORBIDDEN
+  }
+}
+```
+
+When attempted, the LLM receives:
+```
+🔴 DANGEROUS OPERATION FORBIDDEN
+============================================================
+
+DROP operations are FORBIDDEN by default for safety.
+
+Operation Type: DROP
+Target: users_table
+
+⛔ WARNING: Enabling dangerous operations can lead to permanent data loss!
+```
+
+**To enable DROP (use with extreme caution):**
+```json
+{
+  "env": {
+    "ALLOW_DANGEROUS_OPERATIONS": "true",  // Enable DROP operations
+    "ENABLE_DRY_RUN": "true"               // ALWAYS preview DROP first!
+  }
+}
+```
+
+#### 2. DELETE vs DROP - Important Distinction
+
+- **DELETE** = Removes rows from a table (data operation) - configurable approval
+- **DROP** = Removes entire table/index (schema change) - FORBIDDEN by default
+
+```json
+{
+  "env": {
+    "REQUIRE_APPROVAL_DELETE": "true",  // Control row deletion
+    "ALLOW_DANGEROUS_OPERATIONS": "false"  // DROP still forbidden
+  }
+}
+```
+
+#### 3. Dry-Run Mode
+
+Test what the LLM wants to do without making any changes:
+```json
+{
+  "env": {
+    "ENABLE_DRY_RUN": "true"  // Preview all operations without executing
+  }
+}
+```
+
+Example dry-run output:
+```
+🔴 DRY RUN PREVIEW - CRITICAL OPERATION
+============================================================
+
+Operation Type: DROP
+Target: users_table
+
+SQL Query:
+DROP TABLE [users_table]
+
+Estimated Impact:
+This will permanently delete the table and all its data.
+
+============================================================
+⚠️  This is a DRY RUN. No changes have been made to the database.
+```
+
+#### 4. Operation Logging
+
+All destructive operations are automatically logged to `./logs/operations.log`:
+```json
+{
+  "timestamp": "2025-10-31T12:34:56.789Z",
+  "operationType": "DROP",
+  "target": "users_table",
+  "query": "DROP TABLE [users_table]",
+  "severity": "CRITICAL",
+  "dryRun": false,
+  "success": true
+}
+```
+
+### Recommended Safety Configurations
+
+**Development/Testing:**
+```json
+{
+  "env": {
+    "ENABLE_DRY_RUN": "true",                  // Preview everything first
+    "ALLOW_DANGEROUS_OPERATIONS": "false",     // Keep DROP forbidden
+    "REQUIRE_APPROVAL_CREATE": "false",        // Allow CREATE for testing
+    "REQUIRE_APPROVAL_DELETE": "false",        // Allow DELETE for testing
+    "REQUIRE_APPROVAL_UPDATE": "false",        // Allow UPDATE for testing
+    "OPERATION_LOG_DIR": "./logs"              // Local logging
+  }
+}
+```
+
+**Production (Safest):**
+```json
+{
+  "env": {
+    "READONLY": "true"  // Only allow read operations
+  }
+}
+```
+
+**Production (With Write Access, Maximum Safety):**
+```json
+{
+  "env": {
+    "READONLY": "false",
+    "ALLOW_DANGEROUS_OPERATIONS": "false",     // DROP forbidden
+    "REQUIRE_APPROVAL_CREATE": "true",         // Block CREATE
+    "REQUIRE_APPROVAL_DELETE": "true",         // Block DELETE
+    "REQUIRE_APPROVAL_UPDATE": "false",        // Allow UPDATE (has WHERE requirement)
+    "REQUIRE_APPROVAL_INSERT": "false",        // Allow INSERT
+    "OPERATION_LOG_DIR": "/var/log/mcp"        // Centralized logging
+  }
+}
+```
+
+**Production (Allow DROP with extreme caution):**
+```json
+{
+  "env": {
+    "READONLY": "false",
+    "ALLOW_DANGEROUS_OPERATIONS": "true",      // ⚠️ Enable DROP
+    "ENABLE_DRY_RUN": "true",                  // ⚠️ ALWAYS preview first!
+    "REQUIRE_APPROVAL_CREATE": "false",
+    "REQUIRE_APPROVAL_DELETE": "false",
+    "OPERATION_LOG_DIR": "/var/log/mcp"
+  }
+}
+```
+
+You should now have successfully configured the MCP server for MSSQL Database with your preferred AI assistant. This setup allows you to seamlessly interact with MSSQL Database through natural language queries with robust safety protections!
+
+## Testing Your MCP Server
+
+Before using the server in production, it's recommended to test it thoroughly.
+
+### Quick Test with MCP Inspector
+
+The easiest way to test is using the official MCP Inspector:
+
+```bash
+# Set environment variables first
+export MSSQL_SERVER="your-server.database.windows.net"
+export MSSQL_DATABASE="your-database"
+export MSSQL_USER="your-username"
+export MSSQL_PASSWORD="your-password"
+export ENABLE_DRY_RUN="true"  # Safe testing mode
+
+# Run inspector
+npx @modelcontextprotocol/inspector node dist/index.js
+```
+
+The Inspector will open in your browser where you can:
+- See all available tools
+- Test tools with custom parameters
+- View real-time responses
+- Debug issues
+
+### Testing Checklist
+
+- [ ] Server starts without errors
+- [ ] Version detection works (check console output)
+- [ ] List tables returns results
+- [ ] DROP operations are forbidden by default
+- [ ] Dry-run mode shows operation previews
+- [ ] Operations are logged to `logs/operations.log`
+
+For detailed testing procedures, see **[TESTING.md](TESTING.md)** which covers:
+- MCP Inspector usage
+- Manual testing with Node.js scripts
+- Testing with Claude Desktop/VS Code
+- Safety feature testing
+- Version compatibility testing
+- Troubleshooting common issues
