@@ -22,7 +22,10 @@ This server leverages the Model Context Protocol (MCP), a versatile framework th
 
 - Run MSSQL Database queries by just asking questions in plain English
 - Create, read, update, and delete data
+- **Execute stored procedures** with parameterized inputs
 - Manage database schema (tables, indexes)
+- **Dry-run confirmation flow** — preview operations before executing, then confirm with a token
+- **MCP Elicitation support** — interactive human approval when the client supports it
 - Secure connection handling
 - Real-time data interaction
 
@@ -186,6 +189,12 @@ This server leverages the Model Context Protocol (MCP), a versatile framework th
 
 These parameters control approval requirements and operational safety:
 
+**STORED PROCEDURE EXECUTION:**
+
+- **ALLOW_EXEC_PROCEDURE**: Allow stored procedure execution via the `exec_procedure` tool (default: `false` - DISABLED)
+  - Stored procedures can read and modify data, so this requires explicit opt-in
+  - Set to `true` to enable the `exec_procedure` tool
+
 **DANGEROUS OPERATIONS (DROP):**
 
 - **ALLOW_DANGEROUS_OPERATIONS**: Allow DROP operations (default: `false` - FORBIDDEN)
@@ -216,10 +225,15 @@ These parameters control approval requirements and operational safety:
 **DRY-RUN AND LOGGING:**
 
 - **ENABLE_DRY_RUN**: Enable dry-run mode for all destructive operations (default: `false`)
-  - When `true`, all CREATE, DROP, UPDATE, DELETE, and INSERT operations are previewed but NOT executed
-  - Shows the exact SQL query and estimated impact without making database changes
+  - When `true`, all CREATE, DROP, UPDATE, DELETE, INSERT, and EXEC operations return a preview with a **confirmation token**
+  - The caller can re-invoke the same tool with the same parameters plus `confirmToken` to execute
+  - Shows the exact SQL query, estimated impact, and row count estimates (for UPDATE/DELETE)
   - Essential for testing and understanding what the LLM intends to do before execution
   - **Recommended**: Always enable for DROP operations even when `ALLOW_DANGEROUS_OPERATIONS=true`
+
+- **DRY_RUN_TTL_SECONDS**: TTL for confirmation tokens in seconds (default: `300` = 5 minutes)
+  - Tokens are single-use and expire after this duration
+  - Set to a shorter value for tighter security
 
 - **OPERATION_LOG_DIR**: Directory for operation logs (default: `./logs`)
   - All destructive operations are automatically logged to `operations.log` in this directory
@@ -307,6 +321,91 @@ Once configured, you can interact with your database using natural language:
 - "Update all pending orders to completed status"
 - "List all tables in the database"
 - "Drop the temp_data table if it exists" (uses IF EXISTS on SQL Server 2016+)
+
+## Stored Procedure Execution
+
+The `exec_procedure` tool allows executing stored procedures with parameterized inputs. It requires explicit opt-in via `ALLOW_EXEC_PROCEDURE=true`.
+
+### Usage
+
+```text
+You: "Run the annual income report for 2025"
+Claude: *calls exec_procedure with the appropriate SP and parameters*
+```
+
+### Parameters
+
+- **procedureName** (required): The stored procedure name, optionally with schema prefix (e.g., `qb.up_QbAnuualIncome_since2018_forSTI` or `up_SomeProcedure`)
+- **parameters** (optional): Key-value pairs of input parameters (e.g., `{ "year": "2025", "orgCd": "N20110" }`)
+
+### Security
+
+- Procedure names are validated against strict patterns (word characters only, optional schema prefix)
+- Parameters are passed via parameterized inputs (SQL injection safe)
+- Gated by `ALLOW_EXEC_PROCEDURE` environment variable (default: disabled)
+
+## Dry-Run Confirmation Flow
+
+When `ENABLE_DRY_RUN=true`, destructive operations use a **two-phase confirmation flow** instead of simply blocking execution:
+
+### Phase 1: Preview
+
+All destructive operations (INSERT, UPDATE, DELETE, CREATE, DROP, EXEC) return a preview with a **confirmation token**:
+
+```json
+{
+  "mode": "preview",
+  "success": true,
+  "message": "DRY RUN PREVIEW - MEDIUM OPERATION\n...\nTo execute, call the same tool again with confirmToken",
+  "dryRun": true,
+  "confirmToken": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+### Phase 2: Confirm
+
+Re-invoke the same tool with the same parameters plus the `confirmToken` to execute:
+
+```json
+{
+  "mode": "executed",
+  "success": true,
+  "message": "Stored procedure executed successfully. 1 result set(s), 901 total record(s).",
+  "data": [ ... ],
+  "rowsAffected": [0]
+}
+```
+
+### Token Security
+
+- Tokens are **single-use** — consumed on first successful validation
+- Tokens **expire** after 5 minutes (configurable via `DRY_RUN_TTL_SECONDS`)
+- Tokens are **bound to exact parameters** — SHA-256 hash of query and params must match
+- Maximum **100 pending tokens** in memory with oldest-first eviction
+- Server restart invalidates all pending tokens
+
+### MCP Elicitation (Interactive Approval)
+
+When the MCP client supports elicitation (e.g., future Claude Code versions), the server automatically upgrades to **interactive human approval**:
+
+1. The tool pauses mid-execution and presents the SQL to the human user directly
+2. The user approves or declines in their terminal
+3. The LLM is structurally excluded from the approval path
+
+This activates automatically when the client advertises elicitation support. Falls back to token-based confirmation otherwise. No configuration needed.
+
+### Response Mode Field
+
+All destructive tool responses include a `mode` field for programmatic handling:
+
+| Mode | Meaning |
+|---|---|
+| `preview` | Dry-run preview with confirmation token |
+| `executed` | Operation was executed successfully |
+| `confirmation_failed` | Token validation failed (expired, used, params changed) |
+| `error` | Execution error |
+| `approval_required` | Blocked by approval config |
+| `forbidden` | Operation forbidden (e.g., DROP without ALLOW_DANGEROUS_OPERATIONS) |
 
 ## Safety and Security Features
 
@@ -396,6 +495,7 @@ This will permanently delete the table and all its data.
 
 ============================================================
 ⚠️  This is a DRY RUN. No changes have been made to the database.
+To execute this operation, call the same tool again with "confirmToken": "a1b2c3d4-..."
 ```
 
 #### 4. Operation Logging
@@ -501,7 +601,10 @@ The Inspector will open in your browser where you can:
 - [ ] Version detection works (check console output)
 - [ ] List tables returns results
 - [ ] DROP operations are forbidden by default
-- [ ] Dry-run mode shows operation previews
+- [ ] Dry-run mode shows operation previews with confirmation tokens
+- [ ] Confirmation tokens allow execution when replayed with same params
+- [ ] Expired/reused tokens are rejected
+- [ ] `exec_procedure` tool works with stored procedures
 - [ ] Operations are logged to `logs/operations.log`
 
 For detailed testing procedures, see **[TESTING.md](TESTING.md)** which covers:
