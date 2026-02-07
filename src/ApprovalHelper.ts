@@ -8,7 +8,7 @@ import * as path from 'path';
 
 export interface OperationLog {
   timestamp: string;
-  operationType: 'DROP' | 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT';
+  operationType: 'DROP' | 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT' | 'EXEC';
   target: string;
   query: string;
   severity: OperationSeverity;
@@ -58,13 +58,17 @@ function getSeverityIcon(severity: OperationSeverity): string {
 }
 
 /**
- * Generate a dry-run preview for an operation
+ * Generate a dry-run preview for an operation.
+ *
+ * When `confirmToken` is provided the preview tells the caller to re-invoke
+ * the same tool with that token instead of suggesting an env-var change.
  */
 export function generateDryRunPreview(
-  operationType: 'DROP' | 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT',
+  operationType: 'DROP' | 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT' | 'EXEC',
   target: string,
   query: string,
-  estimatedImpact?: string
+  estimatedImpact?: string,
+  confirmToken?: string
 ): string {
   const severity = getOperationSeverity(operationType);
   const icon = getSeverityIcon(severity);
@@ -81,7 +85,12 @@ export function generateDryRunPreview(
 
   preview += `${'='.repeat(60)}\n`;
   preview += `⚠️  This is a DRY RUN. No changes have been made to the database.\n`;
-  preview += `To execute this operation, set ENABLE_DRY_RUN=false\n`;
+
+  if (confirmToken) {
+    preview += `To execute this operation, call the same tool again with "confirmToken": "${confirmToken}"\n`;
+  } else {
+    preview += `To execute this operation, set ENABLE_DRY_RUN=false\n`;
+  }
 
   return preview;
 }
@@ -115,7 +124,7 @@ export function generateDropForbiddenMessage(
  * Generate an approval requirement message for blocked operations
  */
 export function generateApprovalRequiredMessage(
-  operationType: 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT',
+  operationType: 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT' | 'EXEC',
   target: string,
   query: string
 ): string {
@@ -143,6 +152,9 @@ export function generateApprovalRequiredMessage(
       break;
     case 'INSERT':
       message += `Set REQUIRE_APPROVAL_INSERT=false (currently set to true)\n`;
+      break;
+    case 'EXEC':
+      message += `Set ALLOW_EXEC_PROCEDURE=true to enable stored procedure execution\n`;
       break;
   }
 

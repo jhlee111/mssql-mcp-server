@@ -20,8 +20,10 @@ import { CreateIndexTool } from "./tools/CreateIndexTool.js";
 import { ListTableTool } from "./tools/ListTableTool.js";
 import { DropTableTool } from "./tools/DropTableTool.js";
 import { DescribeTableTool } from "./tools/DescribeTableTool.js";
+import { ExecProcedureTool } from "./tools/ExecProcedureTool.js";
 import { loadSafetyConfig } from "./SafetyConfig.js";
 import { detectServerCapabilities, ServerCapabilities } from "./ServerCapabilities.js";
+import { createElicitFn, ElicitFn } from "./ElicitationHelper.js";
 
 // MSSQL Database connection configuration
 
@@ -76,6 +78,7 @@ validateEnvVariables();
 const safetyConfig = loadSafetyConfig();
 console.error('Safety Configuration:', {
   allowDangerousOperations: safetyConfig.allowDangerousOperations,
+  allowExecProcedure: safetyConfig.allowExecProcedure,
   requireApprovalForCreate: safetyConfig.requireApprovalForCreate,
   requireApprovalForUpdate: safetyConfig.requireApprovalForUpdate,
   requireApprovalForDelete: safetyConfig.requireApprovalForDelete,
@@ -111,7 +114,10 @@ export async function createSqlConfig(): Promise<sql.config> {
   };
 }
 
-// Initialize tools with safety configuration (capabilities added after connection)
+// Elicitation function — set after server connects and client capabilities are known
+let elicitFn: ElicitFn | undefined;
+
+// Initialize tools with safety configuration (elicitFn wired after connection)
 const updateDataTool = new UpdateDataTool(safetyConfig);
 const deleteDataTool = new DeleteDataTool(safetyConfig);
 const insertDataTool = new InsertDataTool(safetyConfig);
@@ -121,6 +127,10 @@ const createIndexTool = new CreateIndexTool();
 const listTableTool = new ListTableTool();
 const dropTableTool = new DropTableTool(safetyConfig);
 const describeTableTool = new DescribeTableTool();
+const execProcedureTool = new ExecProcedureTool(safetyConfig);
+
+// Destructive tools that support elicitation
+const destructiveTools = [insertDataTool, updateDataTool, deleteDataTool, createTableTool, dropTableTool, execProcedureTool] as const;
 
 // Getter for server capabilities (set after first connection)
 export function getServerCapabilities(): ServerCapabilities | null {
@@ -147,7 +157,7 @@ const isReadOnly = process.env.READONLY === "true";
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: isReadOnly
     ? [listTableTool, readDataTool, describeTableTool] // todo: add searchDataTool to the list of tools available in readonly mode once implemented
-    : [insertDataTool, readDataTool, describeTableTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool], // add all new tools here
+    : [insertDataTool, readDataTool, describeTableTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, execProcedureTool], // add all new tools here
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -188,6 +198,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         result = await describeTableTool.run(args as { tableName: string });
         break;
+      case execProcedureTool.name:
+        result = await execProcedureTool.run(args);
+        break;
       default:
         return {
           content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -210,6 +223,14 @@ async function runServer() {
   try {
     const transport = new StdioServerTransport();
     await server.connect(transport);
+
+    // Detect client elicitation capability (available only after connect)
+    elicitFn = createElicitFn(server);
+
+    // Wire elicitFn into all destructive tools
+    for (const tool of destructiveTools) {
+      tool.elicit = elicitFn;
+    }
   } catch (error) {
     console.error("Fatal error running server:", error);
     process.exit(1);
@@ -269,4 +290,4 @@ function wrapToolRun(tool: { run: (...args: any[]) => Promise<any> }) {
   };
 }
 
-[insertDataTool, readDataTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, describeTableTool].forEach(wrapToolRun);
+[insertDataTool, readDataTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, describeTableTool, execProcedureTool].forEach(wrapToolRun);

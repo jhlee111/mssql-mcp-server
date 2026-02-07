@@ -1,8 +1,10 @@
 import sql from "mssql";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { SafetyConfig, requiresApproval } from "../SafetyConfig.js";
+import { SafetyConfig, requiresApproval, getOperationSeverity } from "../SafetyConfig.js";
 import { generateDryRunPreview, generateApprovalRequiredMessage, logOperation } from "../ApprovalHelper.js";
 import { getServerCapabilities } from "../index.js";
+import { confirmationStore } from "../ConfirmationStore.js";
+import { ElicitFn, buildConfirmationElicitation } from "../ElicitationHelper.js";
 
 export class CreateTableTool implements Tool {
   [key: string]: any;
@@ -23,10 +25,17 @@ export class CreateTableTool implements Tool {
           },
           required: ["name", "type"]
         }
+      },
+      confirmToken: {
+        type: "string",
+        description: "Optional confirmation token from a dry-run preview. Provide this to execute a previously previewed operation."
       }
     },
     required: ["tableName", "columns"],
   } as any;
+
+  /** Optional MCP elicitation function — set after server connects if client supports it. */
+  elicit?: ElicitFn;
 
   constructor(private safetyConfig: SafetyConfig) {}
 
@@ -62,7 +71,9 @@ export class CreateTableTool implements Tool {
   async run(params: any) {
     const startTime = new Date().toISOString();
     try {
-      const { tableName, columns } = params;
+      const { tableName, columns, confirmToken } = params;
+      const originalParams = { tableName, columns };
+
       if (!Array.isArray(columns) || columns.length === 0) {
         throw new Error("'columns' must be a non-empty array");
       }
@@ -77,6 +88,7 @@ export class CreateTableTool implements Tool {
       if (requiresApproval('CREATE', this.safetyConfig)) {
         const message = generateApprovalRequiredMessage('CREATE', tableName, query);
         return {
+          mode: "approval_required",
           success: false,
           message,
           requiresApproval: true
@@ -86,24 +98,56 @@ export class CreateTableTool implements Tool {
       // Handle dry-run mode
       if (this.safetyConfig.enableDryRun) {
         const columnList = columns.map((col: any) => `  - ${col.name}: ${col.type}`).join('\n');
-        const preview = generateDryRunPreview('CREATE', tableName, query,
-          `This will create a new table with the following columns:\n${columnList}`);
+        const impact = `This will create a new table with the following columns:\n${columnList}`;
 
-        logOperation({
-          timestamp: startTime,
-          operationType: 'CREATE',
-          target: tableName,
-          query,
-          severity: 'HIGH' as any,
-          dryRun: true,
-          success: true
-        });
+        if (confirmToken) {
+          // Priority 1: Token-based confirmation (Phase 1)
+          const validation = confirmationStore.validate(confirmToken, query, originalParams);
+          if (!validation.valid) {
+            return { mode: "confirmation_failed", success: false, message: `Confirmation failed: ${validation.reason}` };
+          }
+          // Token valid — fall through to execution below
+        } else if (this.elicit) {
+          // Priority 2: Elicitation-based confirmation (Phase 2)
+          try {
+            const severity = getOperationSeverity('CREATE');
+            const elicitParams = buildConfirmationElicitation('CREATE', tableName, query, severity, impact);
+            const response = await this.elicit(elicitParams);
+            if (response.action === 'accept' && response.content?.approve) {
+              // User approved — fall through to execution below
+            } else {
+              return { mode: "preview", success: true, message: generateDryRunPreview('CREATE', tableName, query, impact) + '\nOperation declined by user.', dryRun: true };
+            }
+          } catch {
+            console.error('Elicitation failed for CREATE, falling back to token flow.');
+            const token = confirmationStore.create('CREATE', tableName, query, originalParams);
+            const preview = generateDryRunPreview('CREATE', tableName, query, impact);
+            logOperation({ timestamp: startTime, operationType: 'CREATE', target: tableName, query, severity: 'HIGH' as any, dryRun: true, success: true });
+            return { mode: "preview", success: true, message: preview, dryRun: true, confirmToken: token };
+          }
+        } else {
+          // Priority 3: Token preview (fallback)
+          const token = confirmationStore.create('CREATE', tableName, query, originalParams);
+          const preview = generateDryRunPreview('CREATE', tableName, query, impact);
 
-        return {
-          success: true,
-          message: preview,
-          dryRun: true
-        };
+          logOperation({
+            timestamp: startTime,
+            operationType: 'CREATE',
+            target: tableName,
+            query,
+            severity: 'HIGH' as any,
+            dryRun: true,
+            success: true
+          });
+
+          return {
+            mode: "preview",
+            success: true,
+            message: preview,
+            dryRun: true,
+            confirmToken: token
+          };
+        }
       }
 
       // Execute the operation
@@ -126,6 +170,7 @@ export class CreateTableTool implements Tool {
       }
 
       return {
+        mode: "executed",
         success: true,
         message,
         warnings: typeWarnings.length > 0 ? typeWarnings : undefined
@@ -146,6 +191,7 @@ export class CreateTableTool implements Tool {
       });
 
       return {
+        mode: "error",
         success: false,
         message: `Failed to create table: ${error}`
       };

@@ -26,8 +26,14 @@ export interface SafetyConfig {
   /** Require approval for INSERT operations */
   requireApprovalForInsert: boolean;
 
+  /** Allow stored procedure execution (default: false - DISABLED) */
+  allowExecProcedure: boolean;
+
   /** Enable dry-run mode to preview operations without executing */
   enableDryRun: boolean;
+
+  /** TTL in seconds for dry-run confirmation tokens (default: 300 = 5 minutes) */
+  dryRunTtlSeconds?: number;
 }
 
 /**
@@ -44,8 +50,16 @@ export function loadSafetyConfig(): SafetyConfig {
     requireApprovalForDelete: process.env.REQUIRE_APPROVAL_DELETE === 'true', // Default: false
     requireApprovalForInsert: process.env.REQUIRE_APPROVAL_INSERT === 'true', // Default: false
 
+    // Stored procedure execution requires explicit opt-in
+    allowExecProcedure: process.env.ALLOW_EXEC_PROCEDURE === 'true', // Default: false
+
     // Dry-run mode for previewing operations
     enableDryRun: process.env.ENABLE_DRY_RUN === 'true', // Default: false
+
+    // TTL for dry-run confirmation tokens (seconds)
+    dryRunTtlSeconds: process.env.DRY_RUN_TTL_SECONDS
+      ? parseInt(process.env.DRY_RUN_TTL_SECONDS, 10)
+      : undefined,
   };
 }
 
@@ -82,7 +96,7 @@ export function isDropAllowed(config: SafetyConfig): boolean {
  * Note: DROP operations are handled separately by isDropAllowed()
  */
 export function requiresApproval(
-  operationType: 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT' | 'READ',
+  operationType: 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT' | 'READ' | 'EXEC',
   config: SafetyConfig
 ): boolean {
   switch (operationType) {
@@ -96,6 +110,8 @@ export function requiresApproval(
       return config.requireApprovalForInsert;
     case 'READ':
       return false;
+    case 'EXEC':
+      return false; // Exec is gated by allowExecProcedure; no separate approval needed
     default:
       return true; // Default to requiring approval for unknown operations
   }
@@ -105,7 +121,7 @@ export function requiresApproval(
  * Get the severity level for an operation type
  */
 export function getOperationSeverity(
-  operationType: 'DROP' | 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT' | 'READ'
+  operationType: 'DROP' | 'CREATE' | 'UPDATE' | 'DELETE' | 'INSERT' | 'READ' | 'EXEC'
 ): OperationSeverity {
   switch (operationType) {
     case 'DROP':
@@ -115,6 +131,8 @@ export function getOperationSeverity(
     case 'CREATE':
       return OperationSeverity.HIGH;
     case 'UPDATE':
+      return OperationSeverity.MEDIUM;
+    case 'EXEC':
       return OperationSeverity.MEDIUM;
     case 'INSERT':
       return OperationSeverity.LOW;

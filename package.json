@@ -9,7 +9,7 @@
     "url": "https://github.com/jhlee111/mssql-mcp-server.git"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public"
   },
   "main": "dist/index.js",
   "bin": {

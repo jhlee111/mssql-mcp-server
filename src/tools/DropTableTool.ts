@@ -1,8 +1,10 @@
 import sql from "mssql";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { SafetyConfig, isDropAllowed } from "../SafetyConfig.js";
+import { SafetyConfig, isDropAllowed, getOperationSeverity } from "../SafetyConfig.js";
 import { generateDryRunPreview, generateDropForbiddenMessage, logOperation } from "../ApprovalHelper.js";
 import { getServerCapabilities } from "../index.js";
+import { confirmationStore } from "../ConfirmationStore.js";
+import { ElicitFn, buildConfirmationElicitation } from "../ElicitationHelper.js";
 
 export class DropTableTool implements Tool {
   [key: string]: any;
@@ -16,17 +18,25 @@ export class DropTableTool implements Tool {
         type: "boolean",
         description: "If true, use DROP TABLE IF EXISTS (SQL Server 2016+). Ignored on older versions.",
         default: false
+      },
+      confirmToken: {
+        type: "string",
+        description: "Optional confirmation token from a dry-run preview. Provide this to execute a previously previewed operation."
       }
     },
     required: ["tableName"],
   } as any;
+
+  /** Optional MCP elicitation function — set after server connects if client supports it. */
+  elicit?: ElicitFn;
 
   constructor(private safetyConfig: SafetyConfig) {}
 
   async run(params: any) {
     const startTime = new Date().toISOString();
     try {
-      const { tableName, ifExists } = params;
+      const { tableName, ifExists, confirmToken } = params;
+      const originalParams = { tableName };
 
       // Basic validation to prevent SQL injection
       // Allow: letters, numbers, underscores, dots (for schema), brackets (for quoted identifiers)
@@ -56,6 +66,7 @@ export class DropTableTool implements Tool {
       if (!isDropAllowed(this.safetyConfig)) {
         const message = generateDropForbiddenMessage(tableName, query);
         return {
+          mode: "forbidden",
           success: false,
           message,
           forbidden: true
@@ -65,24 +76,56 @@ export class DropTableTool implements Tool {
       // Even with dangerous mode enabled, always show dry-run preview for DROP
       // or respect the global dry-run setting
       if (this.safetyConfig.enableDryRun) {
-        const preview = generateDryRunPreview('DROP', tableName, query,
-          'This will permanently delete the table and all its data.');
+        const impact = 'This will permanently delete the table and all its data.';
 
-        logOperation({
-          timestamp: startTime,
-          operationType: 'DROP',
-          target: tableName,
-          query,
-          severity: 'CRITICAL' as any,
-          dryRun: true,
-          success: true
-        });
+        if (confirmToken) {
+          // Priority 1: Token-based confirmation (Phase 1)
+          const validation = confirmationStore.validate(confirmToken, query, originalParams);
+          if (!validation.valid) {
+            return { mode: "confirmation_failed", success: false, message: `Confirmation failed: ${validation.reason}` };
+          }
+          // Token valid — fall through to execution below
+        } else if (this.elicit) {
+          // Priority 2: Elicitation-based confirmation (Phase 2)
+          try {
+            const severity = getOperationSeverity('DROP');
+            const elicitParams = buildConfirmationElicitation('DROP', tableName, query, severity, impact);
+            const response = await this.elicit(elicitParams);
+            if (response.action === 'accept' && response.content?.approve) {
+              // User approved — fall through to execution below
+            } else {
+              return { mode: "preview", success: true, message: generateDryRunPreview('DROP', tableName, query, impact) + '\nOperation declined by user.', dryRun: true };
+            }
+          } catch {
+            console.error('Elicitation failed for DROP, falling back to token flow.');
+            const token = confirmationStore.create('DROP', tableName, query, originalParams);
+            const preview = generateDryRunPreview('DROP', tableName, query, impact);
+            logOperation({ timestamp: startTime, operationType: 'DROP', target: tableName, query, severity: 'CRITICAL' as any, dryRun: true, success: true });
+            return { mode: "preview", success: true, message: preview, dryRun: true, confirmToken: token };
+          }
+        } else {
+          // Priority 3: Token preview (fallback)
+          const token = confirmationStore.create('DROP', tableName, query, originalParams);
+          const preview = generateDryRunPreview('DROP', tableName, query, impact);
 
-        return {
-          success: true,
-          message: preview,
-          dryRun: true
-        };
+          logOperation({
+            timestamp: startTime,
+            operationType: 'DROP',
+            target: tableName,
+            query,
+            severity: 'CRITICAL' as any,
+            dryRun: true,
+            success: true
+          });
+
+          return {
+            mode: "preview",
+            success: true,
+            message: preview,
+            dryRun: true,
+            confirmToken: token
+          };
+        }
       }
 
       // Execute the operation
@@ -100,6 +143,7 @@ export class DropTableTool implements Tool {
       });
 
       return {
+        mode: "executed",
         success: true,
         message: `Table '${tableName}' dropped successfully.${versionWarning ? '\n' + versionWarning : ''}`
       };
@@ -119,6 +163,7 @@ export class DropTableTool implements Tool {
       });
 
       return {
+        mode: "error",
         success: false,
         message: `Failed to drop table: ${error}`
       };

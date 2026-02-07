@@ -1,7 +1,9 @@
 import sql from "mssql";
 import { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { SafetyConfig, requiresApproval } from "../SafetyConfig.js";
+import { SafetyConfig, requiresApproval, getOperationSeverity } from "../SafetyConfig.js";
 import { generateDryRunPreview, generateApprovalRequiredMessage, logOperation } from "../ApprovalHelper.js";
+import { confirmationStore } from "../ConfirmationStore.js";
+import { ElicitFn, buildConfirmationElicitation } from "../ElicitationHelper.js";
 
 export class InsertDataTool implements Tool {
   [key: string]: any;
@@ -56,22 +58,29 @@ IMPORTANT RULES:
         type: "string", 
         description: "Name of the table to insert data into" 
       },
-      data: { 
+      data: {
         oneOf: [
-          { 
-            type: "object", 
-            description: "Single record data object with column names as keys and values as the data to insert. Example: {\"name\": \"John\", \"age\": 30}" 
+          {
+            type: "object",
+            description: "Single record data object with column names as keys and values as the data to insert. Example: {\"name\": \"John\", \"age\": 30}"
           },
-          { 
-            type: "array", 
+          {
+            type: "array",
             items: { type: "object" },
-            description: "Array of data objects for multiple record insertion. Each object must have identical column structure. Example: [{\"name\": \"John\", \"age\": 30}, {\"name\": \"Jane\", \"age\": 25}]" 
+            description: "Array of data objects for multiple record insertion. Each object must have identical column structure. Example: [{\"name\": \"John\", \"age\": 30}, {\"name\": \"Jane\", \"age\": 25}]"
           }
         ]
+      },
+      confirmToken: {
+        type: "string",
+        description: "Optional confirmation token from a dry-run preview. Provide this to execute a previously previewed operation."
       },
     },
     required: ["tableName", "data"],
   } as any;
+
+  /** Optional MCP elicitation function — set after server connects if client supports it. */
+  elicit?: ElicitFn;
 
   constructor(private safetyConfig: SafetyConfig) {}
 
@@ -79,12 +88,15 @@ IMPORTANT RULES:
     const startTime = new Date().toISOString();
     let query: string | undefined;
     try {
-      const { tableName, data } = params;
+      const { tableName, data, confirmToken } = params;
+      const originalParams = { tableName, data };
+
       // Check if data is an array (multiple records) or single object
       const isMultipleRecords = Array.isArray(data);
       const records = isMultipleRecords ? data : [data];
       if (records.length === 0) {
         return {
+          mode: "error",
           success: false,
           message: "No data provided for insertion",
         };
@@ -95,6 +107,7 @@ IMPORTANT RULES:
         const currentColumns = Object.keys(records[i]).sort();
         if (JSON.stringify(firstRecordColumns) !== JSON.stringify(currentColumns)) {
           return {
+            mode: "error",
             success: false,
             message: `Column mismatch: Record ${i + 1} has different columns than the first record. Expected columns: [${firstRecordColumns.join(', ')}], but got: [${currentColumns.join(', ')}]`,
           };
@@ -134,6 +147,7 @@ IMPORTANT RULES:
       if (requiresApproval('INSERT', this.safetyConfig)) {
         const message = generateApprovalRequiredMessage('INSERT', tableName, query);
         return {
+          mode: "approval_required",
           success: false,
           message,
           requiresApproval: true
@@ -142,27 +156,58 @@ IMPORTANT RULES:
 
       // Handle dry-run mode
       if (this.safetyConfig.enableDryRun) {
-        const recordSummary = isMultipleRecords
-          ? `${records.length} record(s)`
-          : '1 record';
-        const preview = generateDryRunPreview('INSERT', tableName, query,
-          `This will insert ${recordSummary} into the table.`);
+        const recordSummary = isMultipleRecords ? `${records.length} record(s)` : '1 record';
+        const impact = `This will insert ${recordSummary} into the table.`;
 
-        logOperation({
-          timestamp: startTime,
-          operationType: 'INSERT',
-          target: tableName,
-          query,
-          severity: 'LOW' as any,
-          dryRun: true,
-          success: true
-        });
+        if (confirmToken) {
+          // Priority 1: Token-based confirmation (Phase 1)
+          const validation = confirmationStore.validate(confirmToken, query, originalParams);
+          if (!validation.valid) {
+            return { mode: "confirmation_failed", success: false, message: `Confirmation failed: ${validation.reason}` };
+          }
+          // Token valid — fall through to execution below
+        } else if (this.elicit) {
+          // Priority 2: Elicitation-based confirmation (Phase 2)
+          try {
+            const severity = getOperationSeverity('INSERT');
+            const elicitParams = buildConfirmationElicitation('INSERT', tableName, query, severity, impact);
+            const response = await this.elicit(elicitParams);
+            if (response.action === 'accept' && response.content?.approve) {
+              // User approved — fall through to execution below
+            } else {
+              return { mode: "preview", success: true, message: generateDryRunPreview('INSERT', tableName, query, impact) + '\nOperation declined by user.', dryRun: true };
+            }
+          } catch {
+            // Elicitation failed — fall back to token flow
+            console.error('Elicitation failed for INSERT, falling back to token flow.');
+            const token = confirmationStore.create('INSERT', tableName, query, originalParams);
+            const preview = generateDryRunPreview('INSERT', tableName, query, impact);
+            logOperation({ timestamp: startTime, operationType: 'INSERT', target: tableName, query, severity: 'LOW' as any, dryRun: true, success: true });
+            return { mode: "preview", success: true, message: preview, dryRun: true, confirmToken: token };
+          }
+        } else {
+          // Priority 3: Token preview (fallback)
+          const token = confirmationStore.create('INSERT', tableName, query, originalParams);
+          const preview = generateDryRunPreview('INSERT', tableName, query, impact);
 
-        return {
-          success: true,
-          message: preview,
-          dryRun: true
-        };
+          logOperation({
+            timestamp: startTime,
+            operationType: 'INSERT',
+            target: tableName,
+            query,
+            severity: 'LOW' as any,
+            dryRun: true,
+            success: true
+          });
+
+          return {
+            mode: "preview",
+            success: true,
+            message: preview,
+            dryRun: true,
+            confirmToken: token
+          };
+        }
       }
 
       // Execute the operation
@@ -180,6 +225,7 @@ IMPORTANT RULES:
       });
 
       return {
+        mode: "executed",
         success: true,
         message: `Successfully inserted ${records.length} record${records.length > 1 ? 's' : ''} into ${tableName}`,
         recordsInserted: records.length,
@@ -200,6 +246,7 @@ IMPORTANT RULES:
       });
 
       return {
+        mode: "error",
         success: false,
         message: `Failed to insert data: ${error}`,
       };
