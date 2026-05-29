@@ -142,11 +142,13 @@ export class ReadDataTool implements Tool {
       };
     }
 
-    // Check for suspicious string patterns that might indicate obfuscation
-    if (query.includes('CHAR(') || query.includes('NCHAR(') || query.includes('ASCII(')) {
-      return { 
-        isValid: false, 
-        error: 'Character conversion functions are not allowed as they may be used for obfuscation.' 
+    // Check for suspicious string patterns that might indicate obfuscation.
+    // Use negative lookbehind to allow type names like VARCHAR(...) and NVARCHAR(...)
+    // while still blocking standalone CHAR(n)/NCHAR(n)/ASCII(n) used for string building.
+    if (/(?<!N?VAR)CHAR\s*\(/i.test(query) || /(?<!VAR)NCHAR\s*\(/i.test(query) || /ASCII\s*\(/i.test(query)) {
+      return {
+        isValid: false,
+        error: 'Character conversion functions (CHAR/NCHAR/ASCII) are not allowed as they may be used for obfuscation. Note: CAST(... AS NVARCHAR) is allowed.'
       };
     }
 
@@ -240,10 +242,25 @@ export class ReadDataTool implements Tool {
     } catch (error) {
       console.error("Error executing query:", error);
       
-      // Don't expose internal error details to prevent information leakage
+      // Pass through common SQL Server error categories that help diagnose issues,
+      // while still hiding internal details (connection strings, server names, etc.)
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-      const safeErrorMessage = errorMessage.includes('Invalid object name') 
-        ? errorMessage 
+      const safePassthroughPatterns = [
+        'Invalid object name',
+        'Invalid column name',
+        'conversion failed',
+        'collation conflict',
+        'is not a recognized',
+        'permission',
+        'denied',
+        'timeout',
+        'Cannot open database',
+        'Arithmetic overflow',
+        'String or binary data would be truncated',
+        'could not be resolved',
+      ];
+      const safeErrorMessage = safePassthroughPatterns.some(p => errorMessage.toLowerCase().includes(p.toLowerCase()))
+        ? errorMessage
         : 'Database query execution failed';
       
       return {

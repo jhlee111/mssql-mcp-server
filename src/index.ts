@@ -21,6 +21,7 @@ import { ListTableTool } from "./tools/ListTableTool.js";
 import { DropTableTool } from "./tools/DropTableTool.js";
 import { DescribeTableTool } from "./tools/DescribeTableTool.js";
 import { ExecProcedureTool } from "./tools/ExecProcedureTool.js";
+import { ExportToFileTool } from "./tools/ExportToFileTool.js";
 import { loadSafetyConfig } from "./SafetyConfig.js";
 import { detectServerCapabilities, ServerCapabilities } from "./ServerCapabilities.js";
 import { createElicitFn, ElicitFn } from "./ElicitationHelper.js";
@@ -128,6 +129,7 @@ const listTableTool = new ListTableTool();
 const dropTableTool = new DropTableTool(safetyConfig);
 const describeTableTool = new DescribeTableTool();
 const execProcedureTool = new ExecProcedureTool(safetyConfig);
+const exportToFileTool = new ExportToFileTool();
 
 // Destructive tools that support elicitation
 const destructiveTools = [insertDataTool, updateDataTool, deleteDataTool, createTableTool, dropTableTool, execProcedureTool] as const;
@@ -157,7 +159,7 @@ const isReadOnly = process.env.READONLY === "true";
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: isReadOnly
     ? [listTableTool, readDataTool, describeTableTool] // todo: add searchDataTool to the list of tools available in readonly mode once implemented
-    : [insertDataTool, readDataTool, describeTableTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, execProcedureTool], // add all new tools here
+    : [insertDataTool, readDataTool, describeTableTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, execProcedureTool, exportToFileTool], // add all new tools here
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -200,6 +202,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case execProcedureTool.name:
         result = await execProcedureTool.run(args);
+        break;
+      case exportToFileTool.name:
+        result = await exportToFileTool.run(args);
         break;
       default:
         return {
@@ -290,4 +295,4 @@ function wrapToolRun(tool: { run: (...args: any[]) => Promise<any> }) {
   };
 }
 
-[insertDataTool, readDataTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, describeTableTool, execProcedureTool].forEach(wrapToolRun);
+[insertDataTool, readDataTool, updateDataTool, deleteDataTool, createTableTool, createIndexTool, dropTableTool, listTableTool, describeTableTool, execProcedureTool, exportToFileTool].forEach(wrapToolRun);

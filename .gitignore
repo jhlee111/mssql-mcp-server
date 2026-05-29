@@ -53,3 +53,7 @@ claude_desktop_config.json
 .env
 .env.*
 !.env.example
+
+# Local dev scratch files
+.mcp.json
+q.cjs
